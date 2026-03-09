@@ -51,8 +51,8 @@ async function callNova(prompt, maxTokens = 2000, temperature = 0.5) {
 function parseUserInfo(profile) {
   const ag = (profile.ageGender || "").toLowerCase();
   const age = parseInt((ag.match(/(\d+)/) || [])[1]) || 0;
-  const gender = ag.includes("female") || ag.includes("woman") || ag.includes("girl") ? "female"
-    : ag.includes("male") || ag.includes("man") ? "male" : "ALL";
+  const gender = ag.includes("female") || ag.includes("woman") || ag.includes("girl") || ag.includes("widow") || ag.includes("single mother") ? "female"
+    : ag.includes("male") || ag.includes("man") || ag.includes("father") ? "male" : "ALL";
   const loc = (profile.location || "").toLowerCase();
   const state = loc.includes("tamil") || loc.includes("chennai") || loc.includes("coimbatore") ||
     loc.includes("madurai") || loc.includes("trichy") || loc.includes("ooty") || loc.includes("salem") ||
@@ -103,9 +103,13 @@ function hardFilterSchemes(schemes, ui) {
     // Gender filter
     if (e.gender && e.gender !== "ALL" && ui.gender !== "ALL" && e.gender !== ui.gender) return false;
 
-    // State filter — keep ALL (national) or matching state
-    if (e.state && e.state !== "ALL" && s.state && s.state !== "ALL" && ui.state !== "ALL") {
-      if (s.state !== ui.state) return false;
+    // ── STATE FILTER — state is stored at TOP LEVEL s.state, not inside eligibility ──
+    // Keep scheme if: it's national (ALL), state matches user, or state is unknown ("State")
+    if (ui.state !== "ALL") {
+      const schemeState = (s.state || "ALL").trim();
+      if (schemeState !== "ALL" && schemeState !== "State" && schemeState !== ui.state) {
+        return false; // wrong state — filter out
+      }
     }
 
     // Age filter
@@ -118,7 +122,7 @@ function hardFilterSchemes(schemes, ui) {
 
     // Income filter
     if (ui.income && e.incomeLimit && e.incomeLimit > 0) {
-      if (ui.income > e.incomeLimit * 1.2) return false; // 20% buffer for edge cases
+      if (ui.income > e.incomeLimit * 1.2) return false;
     }
 
     return true;
@@ -171,10 +175,14 @@ function keywordScore(scheme, query, profile) {
     if (schemeDesc.includes(word)) score += 2;
   }
 
-  // Single parent / special situations
+  // Single parent / widow / special situations — boost truly relevant schemes
   if (searchText.includes("single parent") || searchText.includes("widow") || searchText.includes("single mother")) {
     if (schemeName.includes("widow") || schemeName.includes("single") || schemeCondition.includes("widow") ||
-        schemeCondition.includes("single parent") || schemeName.includes("destitute")) score += 20;
+        schemeCondition.includes("single parent") || schemeName.includes("destitute") ||
+        schemeName.includes("mahila") || schemeName.includes("women welfare") ||
+        schemeCondition.includes("destitute") || schemeTags.includes("widow")) score += 25;
+    // Heavily penalize completely irrelevant schemes
+    if (schemeName.includes("transgender") || schemeName.includes("girl child") && !searchText.includes("girl")) score -= 50;
   }
 
   // Tailor / self employed
@@ -221,7 +229,31 @@ Apply: ${(s.applicationProcess || "").substring(0, 200)}`;
 function findReferencedScheme(query, previousSchemes, activeSchemeId, allSchemes) {
   const q = query.toLowerCase();
 
-  // Search all schemes by name score
+  // ── PRIORITY 1: Ordinals = shown cards (first/second/third) ────────────────
+  if (previousSchemes && previousSchemes.length > 0) {
+    const ordinals = ["first","second","third","fourth","fifth","1st","2nd","3rd","4th","5th"];
+    const idxMap =   [0,     1,       2,      3,       4,     0,    1,    2,    3,    4];
+    for (let i = 0; i < ordinals.length; i++) {
+      if (q.includes(ordinals[i]) && previousSchemes[idxMap[i]]) {
+        console.log("Ordinal->card #"+(idxMap[i]+1), previousSchemes[idxMap[i]].name);
+        return previousSchemes[idxMap[i]];
+      }
+    }
+    if (q.includes("last")) return previousSchemes[previousSchemes.length - 1];
+    const numMatch = q.match(/scheme\s*[#]?\s*(\d)/);
+    if (numMatch && previousSchemes[parseInt(numMatch[1])-1]) return previousSchemes[parseInt(numMatch[1])-1];
+    const contextWords = ["this scheme","that scheme","the scheme","about it","how to apply","documents needed","apply for it"];
+    if (contextWords.some(w => q.includes(w)) && activeSchemeId) {
+      const active = previousSchemes.find(s => s.schemeId === activeSchemeId);
+      if (active) return active;
+    }
+    for (const s of previousSchemes) {
+      const words = (s.name || "").toLowerCase().split(" ").filter(w => w.length > 4);
+      if (words.some(w => q.includes(w))) return s;
+    }
+  }
+
+  // ── PRIORITY 2: Named specific scheme (needs 2+ meaningful words) ────────
   if (allSchemes && allSchemes.length > 0) {
     const queryWords = q.replace(/[^a-z0-9\s]/g,"").split(/\s+/)
       .filter(w => w.length > 3 && !["what","tell","about","this","that","scheme","please","explain","eligib","criteria","documents","apply"].includes(w));
@@ -245,28 +277,7 @@ function findReferencedScheme(query, previousSchemes, activeSchemeId, allSchemes
     }
   }
 
-  if (!previousSchemes || previousSchemes.length === 0) return null;
 
-  // Ordinal references
-  const ordinals = ["first","second","third","fourth","fifth","1st","2nd","3rd","4th","5th"];
-  const idxMap =   [0,     1,       2,      3,       4,     0,    1,    2,    3,    4];
-  for (let i = 0; i < ordinals.length; i++) {
-    if (q.includes(ordinals[i]) && previousSchemes[idxMap[i]]) return previousSchemes[idxMap[i]];
-  }
-  if (q.includes("last")) return previousSchemes[previousSchemes.length - 1];
-
-  const numMatch = q.match(/scheme\s*[#]?\s*(\d)/);
-  if (numMatch && previousSchemes[parseInt(numMatch[1])-1]) return previousSchemes[parseInt(numMatch[1])-1];
-
-  for (const s of previousSchemes) {
-    const words = (s.name || "").toLowerCase().split(" ").filter(w => w.length > 4);
-    if (words.some(w => q.includes(w))) return s;
-  }
-
-  const contextWords = ["this scheme","that scheme","the scheme","about it","how to apply","documents needed","apply for it"];
-  if (contextWords.some(w => q.includes(w)) && activeSchemeId) {
-    return (previousSchemes||[]).find(s => s.schemeId === activeSchemeId) || null;
-  }
   return null;
 }
 
@@ -382,14 +393,23 @@ ${schemeList}
 
 YOUR TASK: Find the 3 to 5 schemes that MOST genuinely help this specific person RIGHT NOW.
 
-STRICT RULES:
-- NEVER recommend marriage schemes unless user mentioned marriage
-- NEVER recommend pregnancy/maternity unless user mentioned pregnancy
-- NEVER recommend farmer schemes unless user is a farmer
-- For "single parent" queries: look for widow support, women welfare, destitute support, livelihood schemes
-- whyItMatches must be personal — use their real details (age, location, income, situation)
-- NEVER invent benefit amounts — only use data from the list above
-- If a scheme is state-specific, only recommend if it matches the user's state
+STRICT ELIGIBILITY RULES — violating these means a wrong recommendation:
+1. STATE: User is in ${ui.state}. ONLY recommend schemes where state="${ui.state}" OR level="Central". NEVER recommend schemes from other states (Delhi, Haryana, Jharkhand, etc.)
+2. RELEVANCE: ONLY recommend schemes that match the user's ACTUAL situation:
+   - Single parent/widow → look for widow welfare, women support, destitute, mahila, livelihood
+   - Student → scholarships, education support only
+   - Farmer → agriculture schemes only
+   - Unemployed → employment, skill training, livelihood
+3. NEVER recommend:
+   - Transgender schemes unless user mentioned transgender
+   - Girl child schemes unless user mentioned girl child
+   - Farmer schemes unless user is a farmer
+   - Disability schemes unless user mentioned disability
+   - Marriage schemes unless user mentioned marriage
+   - Pregnancy/maternity unless user mentioned pregnancy
+4. whyItMatches must use their REAL details — age, state, income, situation
+5. NEVER invent or modify benefit amounts — use exact data only
+6. If fewer than 3 genuinely eligible schemes exist, return only those — do NOT pad with irrelevant schemes
 
 Return ONLY valid JSON:
 {
@@ -425,66 +445,145 @@ Return ONLY valid JSON:
 }
 
 // ── CONVERSATION MANAGER ──────────────────────────────────────────────────────
+// Designed as a human advisor — NOT a form. Understands context, extracts info
+// intelligently, asks only what's truly missing, and never ignores user's message.
 async function handleConversation(userMessage, conversationHistory, profile, previousSchemes, activeSchemeId, allSchemes) {
-  const profileSummary = Object.entries(profile).filter(([,v]) => v).map(([k,v]) => `${k}: ${v}`).join(" | ") || "Nothing yet";
-  const historyText = conversationHistory.slice(-8).map(m => `${m.role==="user"?"User":"NILAI"}: ${m.content}`).join("\n");
+
+  const profileSummary = Object.entries(profile).filter(([,v]) => v)
+    .map(([k,v]) => `${k}: ${v}`).join(" | ") || "Nothing collected yet";
+
+  const historyText = conversationHistory.slice(-10)
+    .map(m => `${m.role === "user" ? "User" : "NILAI"}: ${m.content}`)
+    .join("\n");
+
   const missingFields = [
-    !profile.problem && "problem/situation",
-    !profile.ageGender && "age & gender",
-    !profile.location && "state & district",
-    !profile.caste && "caste category",
+    !profile.problem    && "problem/need",
+    !profile.ageGender  && "age & gender",
+    !profile.location   && "state/district",
+    !profile.caste      && "caste category",
     !profile.occupation && "occupation & income"
   ].filter(Boolean);
 
-  const prompt = `You are NILAI — a warm, intelligent, caring AI advisor helping people in India discover government schemes. You speak like a kind helpful friend — natural, warm, never robotic.
+  const prompt = `You are NILAI — a warm, intelligent AI advisor helping people in India discover government schemes they are eligible for. You behave exactly like a knowledgeable, empathetic human advisor — never like a form or questionnaire.
 
-CONVERSATION SO FAR:
-${historyText || "Start of conversation."}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONVERSATION HISTORY:
+${historyText || "(start of conversation)"}
 
-CURRENT MESSAGE: "${userMessage}"
-PROFILE SO FAR: ${profileSummary}
+USER'S CURRENT MESSAGE: "${userMessage}"
 
-GOAL: Collect these 5 details through friendly conversation:
-1. Problem/situation (what help they need) ← ask this first
-2. Age and gender
-3. State and district
-4. Caste (General / OBC-BC-MBC / SC / ST / Minority)
-5. Occupation and monthly income
+PROFILE COLLECTED SO FAR: ${profileSummary}
+STILL NEEDED: ${missingFields.join(", ") || "ALL INFO COLLECTED — trigger search now"}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-RULES:
-- ALWAYS respond to what they said FIRST, then ask your question
-- Extract info from their message — don't ask for something they already said
-- If unclear, ask gently for clarification
-- Accept "I don't know" or "skip" and move on
-- You can ask 2 things at once if natural
-- When ALL 5 collected → set readyToSearch: true
+YOUR BEHAVIOR RULES:
 
-MISSING: ${missingFields.join(", ") || "ALL COLLECTED → set readyToSearch: true NOW"}
+RULE 1 — UNDERSTAND FIRST, ASK LATER
+Read the user's message carefully. Extract every piece of useful information before deciding what to ask. Never ask for something already mentioned.
 
-Return ONLY valid JSON:
+RULE 2 — INTELLIGENT EXTRACTION
+From any natural message, extract:
+- Age: any number ("I am 23", "20 year old", "age 45")
+- Gender: woman/man/female/male/girl/boy/widow/mother/father/husband/wife
+- Location: any city, district, or state name mentioned
+- Caste: OBC/BC/MBC/SC/ST/General/Minority/Brahmin/Muslim/Christian
+- Occupation: student/farmer/tailor/unemployed/housewife/worker/engineer/any job
+- Income: any ₹ amount per month/year, OR 0 if unemployed/student
+- Problem: infer from context — "can't afford fees" = education, "no job" = employment, "sick" = health
+- Family status: widow/single parent/disabled/elderly — these are KEY eligibility factors
+
+RULE 3 — RESPOND TO WHAT THEY SAID FIRST
+Always acknowledge their situation with empathy before asking anything. If they shared a problem, show you understood it.
+
+BAD: User says "I am a widow struggling financially" → Bot says "What is your age?"
+GOOD: User says "I am a widow struggling financially" → Bot says "I'm so sorry to hear that. There are several schemes specifically for widows that could really help you. To find the best ones, could you share which state you're in and roughly what your monthly income is?"
+
+RULE 4 — SMART QUESTIONING
+- Combine multiple missing fields into ONE natural question
+- Never ask more than 2 things in one message
+- Ask the MOST IMPORTANT missing fields first
+- Priority order: location > caste > income (age/gender often inferable from context)
+- If someone says "widow" — gender=female is already known, don't ask
+- If someone says "student" — occupation=student, problem=education, don't ask these separately
+- If someone says "unemployed" — income=0, don't ask for income
+- If someone says "farmer" — occupation=farmer, problem=agriculture
+
+RULE 5 — WHEN TO SEARCH
+Search immediately when you have enough to find relevant schemes:
+- Have: location + (caste OR income OR occupation) + problem → SEARCH
+- Have: 4+ fields filled → SEARCH
+- User says "find me schemes" / "search now" / "what schemes" → SEARCH with what you have
+- Never make user answer more than 3 questions total
+
+RULE 6 — HANDLE SPECIAL SITUATIONS
+- "widow" / "single parent" / "disabled" / "elderly" → these are strong eligibility signals, extract them
+- If user is frustrated or says "I told you" → apologize, extract from history, proceed
+- If user says "skip" / "don't know" → accept it and move forward
+- College name, specific disease, business type → these are extra details, don't block on them
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXAMPLE CONVERSATIONS:
+
+Example 1:
+User: "I am a widow with two children and struggling financially"
+extractedInfo: {problem: "financial support for widow", ageGender: "female", occupation: "widow"}
+message: "I'm sorry you're going through this difficult time. There are government schemes specifically designed to support widows and their children. To find the best ones for you, could you tell me which state you live in and your approximate monthly income?"
+readyToSearch: false (missing location)
+
+Example 2:
+User: "I am 20 years old male engineering student from Chennai, Tamil Nadu, OBC caste, my family income is 3000 per month"
+extractedInfo: {problem: "education support", ageGender: "20 male", location: "Chennai Tamil Nadu", caste: "OBC", occupation: "student 3000/month"}
+message: "Great, I have all the details I need! Let me search for the best education scholarships and financial support schemes for you right now."
+readyToSearch: true
+
+Example 3:
+User: "I need help"
+message: "Of course, I'm here to help! Could you tell me a bit about your situation — what kind of help are you looking for, and which state are you from?"
+readyToSearch: false
+
+Example 4:
+User: "I am a farmer in Punjab, SC category, 45 years old"
+extractedInfo: {problem: "agriculture support", ageGender: "45", location: "Punjab", caste: "SC", occupation: "farmer"}
+message: "I understand you're a farmer in Punjab looking for support. To find the most relevant schemes, what is your approximate monthly or annual income from farming?"
+readyToSearch: false (missing income — important for farmer schemes)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ONLY valid JSON (absolutely no other text, no markdown):
 {
-  "message": "Your warm natural response — acknowledge what they said, then ask what's needed next. No lists. Conversational.",
+  "message": "Your warm, empathetic, natural response. Acknowledge their situation first. Then ask only what is truly needed in one friendly question.",
   "extractedInfo": {
-    "problem": "extracted or null",
-    "ageGender": "extracted or null",
-    "location": "extracted or null",
-    "caste": "extracted or null",
-    "occupation": "extracted or null"
+    "problem": "extracted problem/need or null",
+    "ageGender": "extracted age and gender or null",
+    "location": "extracted city/state or null",
+    "caste": "extracted caste or null",
+    "occupation": "extracted occupation and income or null"
   },
   "readyToSearch": false,
   "suggestedOptions": []
 }
 
-NOTE: suggestedOptions — only fill when asking about caste: ["General","OBC-BC-MBC","SC","ST","Minority"]`;
+IMPORTANT:
+- suggestedOptions: ONLY fill with ["General","OBC-BC-MBC","SC","ST","Minority"] when you are specifically asking about caste category. Otherwise always []
+- Set readyToSearch: true when you have enough info (location + any 2 other fields)
+- Extract "widow"/"single parent"/"disabled" into the problem AND ageGender/occupation fields`;
 
-  const raw = await callNova(prompt, 700, 0.7);
+  const raw = await callNova(prompt, 1000, 0.4);
   try {
-    const m = raw.replace(/```json|```/g,"").trim().match(/\{[\s\S]*\}/);
-    return JSON.parse(m ? m[0] : raw);
+    const m = raw.replace(/```json|```/g, "").trim().match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(m ? m[0] : raw);
+    // Safety: ensure suggestedOptions is always an array
+    if (!Array.isArray(parsed.suggestedOptions)) parsed.suggestedOptions = [];
+    return parsed;
   } catch(e) {
-    return { message: raw.replace(/```json|```|\{|\}/g,"").trim() || "Could you tell me what kind of help you're looking for?", extractedInfo:{}, readyToSearch:false, suggestedOptions:[] };
+    console.error("Conv parse error:", e.message);
+    return {
+      message: raw.replace(/```json|```|\{|\}/g, "").trim() || "Could you tell me a bit about what kind of help you're looking for?",
+      extractedInfo: {}, readyToSearch: false, suggestedOptions: []
+    };
   }
 }
+
+
 
 // ── MAIN HANDLER ──────────────────────────────────────────────────────────────
 exports.handler = async (event) => {
@@ -504,6 +603,21 @@ exports.handler = async (event) => {
 
     const allSchemes = await getAllSchemes();
 
+    // ── SHORTCUT: If user says "find me schemes" / "search" and profile has enough info ──
+    const isSearchIntent = /find.*scheme|search.*scheme|show.*scheme|need.*scheme|get.*scheme|i need scheme|give.*scheme/i.test(userMessage);
+    const profileFields = ['ageGender','location','caste'].filter(k => profile[k]);
+    if (isSearchIntent && profileFields.length >= 2 && phase === "collect") {
+      const enrichedProfile = { ...profile };
+      if (!enrichedProfile.problem) enrichedProfile.problem = userMessage;
+      const result = await searchSchemes(enrichedProfile, allSchemes, []);
+      return { statusCode:200, headers, body:JSON.stringify({
+        success:true, intent:"search",
+        understanding:result.understanding, matches:result.matches,
+        totalSchemesAnalyzed:allSchemes.length,
+        updatedProfile:enrichedProfile, phase:"results"
+      })};
+    }
+
     // ── RESULTS PHASE ─────────────────────────────────────────────────────────
     if (phase === "results") {
 
@@ -519,16 +633,25 @@ exports.handler = async (event) => {
         })};
       }
 
-      // New search request
-      const isNewSearch = /is there|any scheme|schemes for|other scheme|different scheme|what about|find me|search for|show me|are there|more schemes/i.test(userMessage);
+      // New search request — also trigger when user gives new personal info
+      const isNewSearch = /is there|any scheme|schemes for|other scheme|different scheme|what about|find me|search for|show me|are there|more schemes|i am a|i am an|i need support|i need help|actually i/i.test(userMessage);
       if (isNewSearch) {
-        const result = await searchSchemes(profile, allSchemes, previousSchemes, userMessage);
+        // Extract any new profile info from this message and merge
+        const convForNewInfo = await handleConversation(userMessage, conversationHistory, profile, [], null, allSchemes);
+        const mergedProfile = { ...profile };
+        if (convForNewInfo.extractedInfo) {
+          Object.entries(convForNewInfo.extractedInfo).forEach(([k,v]) => {
+            if (v && v !== "null") mergedProfile[k] = v;
+          });
+        }
+        // Use the user message as the specific query focus
+        const result = await searchSchemes(mergedProfile, allSchemes, previousSchemes, userMessage);
         if (result.matches.length > 0) {
           return { statusCode:200, headers, body:JSON.stringify({
             success:true, intent:"search",
             understanding:result.understanding, matches:result.matches,
             totalSchemesAnalyzed:allSchemes.length,
-            updatedProfile:profile, phase:"results"
+            updatedProfile:mergedProfile, phase:"results"
           })};
         }
       }
@@ -561,7 +684,36 @@ exports.handler = async (event) => {
       });
     }
 
-    if (conv.readyToSearch) {
+    // Auto-infer problem and gender from situation keywords
+    const allText = (userMessage + " " + (updatedProfile.occupation || "") + " " + (updatedProfile.problem || "")).toLowerCase();
+    if (!updatedProfile.problem) {
+      if (allText.includes("widow") || allText.includes("single parent") || allText.includes("single mother"))
+        updatedProfile.problem = "widow single parent financial support";
+      else if (allText.includes("unemployed") || allText.includes("no job"))
+        updatedProfile.problem = "unemployment support";
+      else if (allText.includes("student") || allText.includes("college") || allText.includes("school"))
+        updatedProfile.problem = "education support";
+      else if (allText.includes("farmer") || allText.includes("farming") || allText.includes("crop"))
+        updatedProfile.problem = "agriculture support";
+      else if (allText.includes("disabled") || allText.includes("disability"))
+        updatedProfile.problem = "disability support";
+    }
+    // Auto-set gender from situation keywords
+    if (!updatedProfile.ageGender || !updatedProfile.ageGender.includes("male")) {
+      if (allText.includes("widow") || allText.includes("single mother") || allText.includes("woman") || allText.includes("female")) {
+        updatedProfile.ageGender = (updatedProfile.ageGender || "") + " female";
+        updatedProfile.ageGender = updatedProfile.ageGender.trim();
+      }
+    }
+
+    // Smart search trigger: location + any 2 other fields = enough to search
+    const filledFields = ['problem','ageGender','location','caste','occupation'].filter(k => updatedProfile[k]);
+    const hasLocation = !!updatedProfile.location;
+    const shouldSearch = conv.readyToSearch ||
+      filledFields.length >= 4 ||
+      (hasLocation && filledFields.length >= 3);
+
+    if (shouldSearch) {
       const result = await searchSchemes(updatedProfile, allSchemes, previousSchemes);
       return { statusCode:200, headers, body:JSON.stringify({
         success:true, intent:"search",
