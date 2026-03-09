@@ -1,0 +1,25 @@
+# Node modules
+node_modules/
+
+# Data files
+data/
+schemes*.json
+
+# Lambda zip
+*.zip
+
+# Environment & secrets
+.env
+.env.local
+.env.production
+
+# React build
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
